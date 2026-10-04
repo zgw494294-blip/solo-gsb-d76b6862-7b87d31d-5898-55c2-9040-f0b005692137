@@ -1,0 +1,41 @@
+{
+  "nodes": [
+    {
+      "id": "users",
+      "type": "source",
+      "columns": [
+        {"name": "uid", "sensitive": false},
+        {"name": "email", "sensitive": false},
+        {"name": "country", "sensitive": false}
+      ]
+    },
+    {
+      "id": "only_cn",
+      "type": "filter",
+      "input": "users",
+      "references": ["country"]
+    },
+    {
+      "id": "export_users",
+      "type": "projection",
+      "input": "only_cn",
+      "columns": [
+        {"name": "user_id", "copy": "uid"},
+        {"name": "mail", "copy": "email"},
+        {"name": "bucket", "constant": "ALL"}
+      ]
+    }
+  ],
+  "export": "export_users",
+  "rows": {
+    "users": [
+      {"uid": 1, "email": "a@x.example", "country": "CN"},
+      {"uid": 2, "email": "b@x.example", "country": "US"},
+      {"uid": 3, "email": null, "country": "CN"},
+      {"uid": 4, "email": "d@x.example", "country": "cn"}
+    ]
+  },
+  "conditions": {
+    "only_cn": {"country": "CN"}
+  }
+}

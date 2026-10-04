@@ -1,0 +1,22 @@
+services:
+  export-risk-api:
+    build: .
+    image: export-risk-review:latest
+    container_name: export-risk-review
+    ports:
+      - "8080:8080"
+    environment:
+      # SQLite database lives on the named volume so registrations and the
+      # sensitive-column registry survive container restarts.
+      RISK_API_DB: /data/export-risk.db
+    volumes:
+      - export-risk-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  export-risk-data:

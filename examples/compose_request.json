@@ -1,0 +1,62 @@
+{
+  "downstream": {
+    "nodes": [
+      {
+        "id": "users",
+        "type": "source",
+        "columns": [
+          {"name": "uid", "sensitive": false},
+          {"name": "email", "sensitive": true},
+          {"name": "country", "sensitive": false}
+        ]
+      },
+      {
+        "id": "only_cn",
+        "type": "filter",
+        "input": "users",
+        "references": ["country"]
+      },
+      {
+        "id": "export_users",
+        "type": "projection",
+        "input": "only_cn",
+        "columns": [
+          {"name": "user_id", "copy": "uid"},
+          {"name": "mail", "copy": "email"},
+          {"name": "bucket", "constant": "ALL"}
+        ]
+      }
+    ],
+    "export": "export_users"
+  },
+  "upstream": {
+    "nodes": [
+      {
+        "id": "raw_users",
+        "type": "source",
+        "columns": [
+          {"name": "uid", "sensitive": false},
+          {"name": "email_hash", "sensitive": true},
+          {"name": "country", "sensitive": false}
+        ]
+      },
+      {
+        "id": "safe_users",
+        "type": "projection",
+        "input": "raw_users",
+        "columns": [
+          {"name": "uid", "copy": "uid"},
+          {"name": "mail", "constant": null},
+          {"name": "country", "copy": "country"}
+        ]
+      }
+    ],
+    "export": "safe_users"
+  },
+  "source": "users",
+  "mapping": [
+    {"column": "uid", "from": "uid"},
+    {"column": "email", "from": "mail"},
+    {"column": "country", "from": "country"}
+  ]
+}

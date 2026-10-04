@@ -1,0 +1,50 @@
+{
+  "baseline": {
+    "nodes": [
+      {
+        "id": "s",
+        "type": "source",
+        "columns": [
+          {"name": "x", "sensitive": true},
+          {"name": "y", "sensitive": false}
+        ]
+      },
+      {
+        "id": "e",
+        "type": "projection",
+        "input": "s",
+        "columns": [
+          {"name": "a", "copy": "x"}
+        ]
+      }
+    ],
+    "export": "e"
+  },
+  "candidate": {
+    "nodes": [
+      {
+        "id": "s",
+        "type": "source",
+        "columns": [
+          {"name": "x", "sensitive": true},
+          {"name": "y", "sensitive": false}
+        ]
+      },
+      {
+        "id": "f",
+        "type": "filter",
+        "input": "s",
+        "references": ["x"]
+      },
+      {
+        "id": "e",
+        "type": "projection",
+        "input": "f",
+        "columns": [
+          {"name": "a", "copy": "y"}
+        ]
+      }
+    ],
+    "export": "e"
+  }
+}

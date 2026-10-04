@@ -21,6 +21,7 @@ from .models import (
     ComposeRequest,
     GraphPreviewRequest,
     GraphRegisterRequest,
+    PackagePurgeRequest,
     PackageReleaseRequest,
     PreviewRequest,
     PruneRequest,
@@ -61,9 +62,14 @@ app = FastAPI(
         "passing small-sample result can be sealed into a pending-release "
         "export package, released under the current registry generation and "
         "claimed afterwards — release and claim always serve the sealed "
-        "data, never a different batch."
+        "data, never a different batch. Sealed samples can finally be "
+        "purged by source column: every live package whose export depends "
+        "on a listed column (by the original content and row-influence "
+        "rules, ignoring sensitivity marks) loses its stored rows and "
+        "release record and stays purged for good — release and claim then "
+        "answer 410."
     ),
-    version="1.8.0",
+    version="1.9.0",
     lifespan=lifespan,
 )
 
@@ -188,6 +194,11 @@ async def release_sealed_package(
             content={"error": {"code": "PACKAGE_NOT_FOUND",
                                "message": f"no sealed package with id '{package_id}'"}},
         )
+    except registry.PackagePurged as exc:
+        return JSONResponse(
+            status_code=410,
+            content={"error": {"code": "PACKAGE_PURGED", "message": str(exc)}},
+        )
     except registry.StaleGeneration as exc:
         return JSONResponse(
             status_code=409,
@@ -212,6 +223,11 @@ async def claim_sealed_package(package_id: str) -> object:
             content={"error": {"code": "PACKAGE_NOT_FOUND",
                                "message": f"no sealed package with id '{package_id}'"}},
         )
+    except registry.PackagePurged as exc:
+        return JSONResponse(
+            status_code=410,
+            content={"error": {"code": "PACKAGE_PURGED", "message": str(exc)}},
+        )
     except registry.PackageNotReleased as exc:
         return JSONResponse(
             status_code=409,
@@ -224,6 +240,12 @@ async def claim_sealed_package(package_id: str) -> object:
                 }
             },
         )
+
+
+@app.post("/api/packages/purge")
+async def purge_sealed_packages(request: PackagePurgeRequest) -> object:
+    columns = [(item.source, item.column) for item in request.columns]
+    return registry.purge_packages(columns)
 
 
 @app.get("/api/sensitive-columns")

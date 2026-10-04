@@ -332,6 +332,43 @@ class PackageReleaseRequest(StrictModel):
     expected_generation: int = Field(ge=0)
 
 
+class PackagePurgeColumnIn(StrictModel):
+    """One source column whose dependent sealed samples must be purged.
+
+    The column is identified by its source node id (``source``) and its
+    name; both are non-empty. The pair need not name a source or column any
+    registered graph declares — unmatched sources simply purge nothing.
+    """
+
+    source: str = Field(min_length=1)
+    column: str = Field(min_length=1)
+
+
+class PackagePurgeRequest(StrictModel):
+    """Purge every sealed package whose export depends on a listed column.
+
+    ``columns`` is a non-empty list of ``(source, column)`` pairs; the pairs
+    must be mutually distinct (duplicates are a schema error). The dependency
+    decision follows the original content-provenance and row-influence rules
+    with sensitivity marks ignored entirely.
+    """
+
+    columns: list[PackagePurgeColumnIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _columns_distinct(self) -> "PackagePurgeRequest":
+        seen: set[tuple[str, str]] = set()
+        for item in self.columns:
+            key = (item.source, item.column)
+            if key in seen:
+                raise ValueError(
+                    f"purge column '{item.source}/{item.column}' is listed "
+                    "more than once"
+                )
+            seen.add(key)
+        return self
+
+
 class PruneRequest(StrictModel):
     """A review request plus the export columns the caller wants to keep.
 

@@ -11,7 +11,9 @@ Three pieces of state survive restarts:
 * every sealed export package: the graph it was sealed from, the sample
   ``columns``/``rows`` frozen at seal time, the registry ``generation`` the
   package was created under, and — once released — the ``release_generation``
-  the package was released under (NULL while unreleased).
+  the package was released under (NULL while unreleased). A package purged
+  by source column keeps its id but loses its ``rows`` and release record
+  and carries a persistent ``purged`` marker.
 
 All reads and writes of the in-process state go through one lock, and a
 replacement persists the new entries, the new generation and every graph's new
@@ -62,7 +64,8 @@ CREATE TABLE IF NOT EXISTS packages (
     columns TEXT NOT NULL,
     rows TEXT NOT NULL,
     generation INTEGER NOT NULL,
-    release_generation INTEGER
+    release_generation INTEGER,
+    purged INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -85,7 +88,25 @@ class Store:
             if self._path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")
+            self._migrate()
         self._init_meta()
+
+    def _migrate(self) -> None:
+        """Bring a database file written by an older release up to date.
+
+        Columns added after the first schema version are attached with
+        ``ALTER TABLE`` when missing, so an existing database (the Compose
+        named volume survives image updates) keeps working unchanged.
+        """
+        package_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(packages)")
+        }
+        if "purged" not in package_columns:
+            self._conn.execute(
+                "ALTER TABLE packages ADD COLUMN purged "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         with self.lock:
@@ -228,13 +249,13 @@ class Store:
     def list_package_rows(self) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT id, graph_id, columns, rows, generation, "
-            "release_generation FROM packages ORDER BY ordinal"
+            "release_generation, purged FROM packages ORDER BY ordinal"
         ).fetchall()
 
     def get_package_row(self, package_id: str) -> Optional[sqlite3.Row]:
         return self._conn.execute(
             "SELECT id, graph_id, columns, rows, generation, "
-            "release_generation FROM packages WHERE id = ?",
+            "release_generation, purged FROM packages WHERE id = ?",
             (package_id,),
         ).fetchone()
 
@@ -280,6 +301,23 @@ class Store:
             self._conn.execute(
                 "UPDATE packages SET release_generation = ? WHERE id = ?",
                 (release_generation, package_id),
+            )
+
+    def purge_packages(self, package_ids: list[str]) -> None:
+        """Mark packages purged, dropping their rows and release records.
+
+        Every listed package is updated in one explicit transaction: the
+        sealed ``rows`` are discarded, the release record is cleared and the
+        persistent ``purged`` marker is set. A failed write or commit rolls
+        the whole batch back — no package is left half-purged. The graph,
+        the registry and the generation are never touched, and no attempt is
+        made to scrub SQLite free pages or WAL remnants.
+        """
+        with self._transaction():
+            self._conn.executemany(
+                "UPDATE packages SET rows = '[]', release_generation = NULL, "
+                "purged = 1 WHERE id = ?",
+                [(package_id,) for package_id in package_ids],
             )
 
 

@@ -35,6 +35,10 @@ reviews column by column (columns paired by name, origins identified by
 ``(source node id, source column name)``), listing content and row origins
 added or removed by the candidate and flagging the risk the candidate newly
 introduces.
+
+``export_dependencies`` reuses the same provenance machinery with every
+source column as its own origin to list every source column an export
+depends on, ignoring sensitivity marks entirely.
 """
 
 from __future__ import annotations
@@ -390,6 +394,39 @@ def review(
 ) -> dict[str, object]:
     _by_id, _order, relations = _evaluate_graph(request, extra_sensitive)
     return _review_export(request.export, relations)
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity-agnostic export dependency analysis
+# ---------------------------------------------------------------------------
+
+
+def export_dependencies(request: ReviewRequest) -> frozenset[Origin]:
+    """Return every source column the export depends on.
+
+    The whole graph is validated and evaluated under exactly the same rules
+    as :func:`review`, but with *every* source column treated as its own
+    origin, so in-graph ``sensitive`` flags and the shared registry play no
+    role in the result. The dependency set unions the export relation's row
+    origins with every export column's content origins: ``copy`` inherits the
+    upstream column's dependencies, ``constant`` cuts only content provenance
+    (row influence left by filters and joins still counts), filter references
+    and join keys contribute their content dependencies as row-level
+    influence, and only the export's dependency closure can contribute —
+    side branches never do.
+    """
+    every_source_column = frozenset(
+        (node.id, column.name)
+        for node in request.nodes
+        if isinstance(node, SourceNodeIn)
+        for column in node.columns
+    )
+    _by_id, _order, relations = _evaluate_graph(request, every_source_column)
+    export_relation = relations[request.export]
+    dependencies = set(export_relation.row_origins)
+    for column in export_relation.columns:
+        dependencies |= column.content_origins
+    return frozenset(dependencies)
 
 
 def serialize_node(node: object) -> dict[str, object]:

@@ -11,7 +11,10 @@ Three pieces of state survive restarts:
 * every sealed export package: the graph it was sealed from, the sample
   ``columns``/``rows`` frozen at seal time, the registry ``generation`` the
   package was created under, and — once released — the ``release_generation``
-  the package was released under (NULL while unreleased).
+  the package was released under (NULL while unreleased). A package whose
+  sealed rows were purged by source column carries a persistent ``purged``
+  flag: its frozen ``rows`` and its release record are deleted, and the flag
+  keeps the release and claim entries closed (HTTP 410) for good.
 
 All reads and writes of the in-process state go through one lock, and a
 replacement persists the new entries, the new generation and every graph's new
@@ -20,7 +23,9 @@ commits or nothing at all changes, so a registry can never be observed
 together with stale conclusions — not even after a write or commit failure,
 and not after the database is reopened. Sealing a package and recording its
 release are likewise single atomic writes: a failed write or commit never
-leaves a new package or a new release record behind.
+leaves a new package or a new release record behind. Purging is atomic too:
+every matched package is cleared in one transaction, so a failed write or
+commit leaves the whole batch exactly as it was.
 """
 
 from __future__ import annotations
@@ -62,7 +67,8 @@ CREATE TABLE IF NOT EXISTS packages (
     columns TEXT NOT NULL,
     rows TEXT NOT NULL,
     generation INTEGER NOT NULL,
-    release_generation INTEGER
+    release_generation INTEGER,
+    purged INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -85,7 +91,26 @@ class Store:
             if self._path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")
+        self._migrate()
         self._init_meta()
+
+    def _migrate(self) -> None:
+        """Bring database files written by older versions up to the schema.
+
+        Databases created before packages carried a purge marker lack the
+        ``purged`` column; add it in place (existing packages are of course
+        not purged). Newer databases already have it and are left untouched.
+        """
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(packages)")
+        }
+        if "purged" not in columns:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE packages "
+                    "ADD COLUMN purged INTEGER NOT NULL DEFAULT 0"
+                )
 
     def close(self) -> None:
         with self.lock:
@@ -228,13 +253,13 @@ class Store:
     def list_package_rows(self) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT id, graph_id, columns, rows, generation, "
-            "release_generation FROM packages ORDER BY ordinal"
+            "release_generation, purged FROM packages ORDER BY ordinal"
         ).fetchall()
 
     def get_package_row(self, package_id: str) -> Optional[sqlite3.Row]:
         return self._conn.execute(
             "SELECT id, graph_id, columns, rows, generation, "
-            "release_generation FROM packages WHERE id = ?",
+            "release_generation, purged FROM packages WHERE id = ?",
             (package_id,),
         ).fetchone()
 
@@ -280,6 +305,23 @@ class Store:
             self._conn.execute(
                 "UPDATE packages SET release_generation = ? WHERE id = ?",
                 (release_generation, package_id),
+            )
+
+    def purge_packages(self, package_ids: list[str]) -> None:
+        """Clear the sealed rows and release record of every listed package.
+
+        Each package's frozen ``rows`` are replaced by an empty batch, its
+        release record is removed and it is flagged as purged — a persistent,
+        irreversible marker. The whole batch commits in one transaction: any
+        write or commit failure rolls every package back to its exact prior
+        state. Wiping SQLite free pages or WAL leftovers is explicitly not
+        required.
+        """
+        with self._transaction():
+            self._conn.executemany(
+                "UPDATE packages SET rows = '[]', release_generation = NULL, "
+                "purged = 1 WHERE id = ?",
+                [(package_id,) for package_id in package_ids],
             )
 
 

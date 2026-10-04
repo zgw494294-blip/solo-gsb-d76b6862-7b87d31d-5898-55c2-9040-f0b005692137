@@ -1728,3 +1728,44 @@ def compare(request: CompareRequest) -> dict[str, object]:
         "regression": regression,
         "columns": columns_out,
     }
+
+
+# ---------------------------------------------------------------------------
+# Source-column dependencies of an export (sensitivity-independent)
+# ---------------------------------------------------------------------------
+#
+# Purging sealed packages asks a different question than the review: not
+# "does sensitive data reach the export" but "does the export depend on this
+# source column at all". The answer reuses the original propagation rules
+# with every source column tracked as its own origin.
+
+
+def export_source_dependencies(
+    request: ReviewRequest,
+) -> tuple[frozenset[Origin], frozenset[Origin]]:
+    """Return the export's source-column dependencies, split by influence kind.
+
+    Every source column is tracked as its own origin — in-graph ``sensitive``
+    flags and the shared registry play no role — under the original
+    propagation rules: ``copy`` inherits content origins while ``constant``
+    clears only content origins (row-level influence survives a projection),
+    filters fold their referenced columns' content into row influence, and
+    joins merge both inputs' row influence plus the join keys' content. Only
+    the export's dependency closure contributes; side branches never reach
+    the export.
+
+    Returns ``(content_origins, row_origins)``: the union of every export
+    column's content origins, and the export relation's row origins.
+    """
+    all_origins = frozenset(
+        (node.id, column.name)
+        for node in request.nodes
+        if isinstance(node, SourceNodeIn)
+        for column in node.columns
+    )
+    _by_id, _order, relations = _evaluate_graph(request, all_origins)
+    export_relation = relations[request.export]
+    content: set[Origin] = set()
+    for column in export_relation.columns:
+        content |= column.content_origins
+    return frozenset(content), export_relation.row_origins

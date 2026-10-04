@@ -1,16 +1,18 @@
 """Registered-graph and shared-registry operations on top of the engine.
 
 Every operation here runs under the store's single lock, so registration,
-reads, registered previews, package sealing/releasing/claiming and registry
-replacements take effect in one observable total order. Within that order
-each decision uses the *same* generation for the registry, the stored review
-conclusions and the review a preview is gated on: a preview either precedes a
-replacement (old registry plus old conclusion) or follows it (new registry
-plus freshly computed, newly stored conclusion), never a mixture of the two.
-Likewise a package is sealed, released or claimed either fully before or
-fully after a replacement — a release can never be recorded under a stale
-generation, and a claim can never serve data whose release generation the
-registry has already moved past.
+reads, registered previews, package sealing/releasing/claiming/purging and
+registry replacements take effect in one observable total order. Within that
+order each decision uses the *same* generation for the registry, the stored
+review conclusions and the review a preview is gated on: a preview either
+precedes a replacement (old registry plus old conclusion) or follows it (new
+registry plus freshly computed, newly stored conclusion), never a mixture of
+the two. Likewise a package is sealed, released, claimed or purged either
+fully before or fully after a replacement — a release can never be recorded
+under a stale generation, and a claim can never serve data whose release
+generation the registry has already moved past. A purge only ever touches
+packages that existed when it took effect; packages sealed afterwards are
+unaffected, and a purged package stays purged for good.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from .engine import ValidationError
+from .engine import ValidationError, export_source_dependencies
 from .engine import preview as run_preview
 from .engine import review as run_review
 from .models import PreviewRequest, ReviewRequest
@@ -31,6 +33,22 @@ class GraphNotFound(Exception):
 
 class PackageNotFound(Exception):
     """No sealed export package carries the given id (HTTP 404)."""
+
+
+class PackagePurged(Exception):
+    """The package's sealed sample data has been purged (HTTP 410).
+
+    Purging is permanent: the frozen rows and the release record were
+    deleted and the package carries a persistent flag in the database, so
+    no registry change, re-release or restart can ever bring the data back.
+    """
+
+    def __init__(self, package_id: str):
+        super().__init__(
+            f"package '{package_id}' has been purged; its sealed sample "
+            "data is permanently gone"
+        )
+        self.package_id = package_id
 
 
 class PackageNotReleased(Exception):
@@ -225,6 +243,8 @@ def release_package(
         row = db.get_package_row(package_id)
         if row is None:
             raise PackageNotFound(package_id)
+        if row["purged"]:
+            raise PackagePurged(package_id)
         extra_sensitive, generation = _registry_snapshot()
         if expected_generation != generation:
             raise StaleGeneration(expected_generation, generation)
@@ -264,6 +284,8 @@ def claim_package(package_id: str) -> dict[str, object]:
         row = db.get_package_row(package_id)
         if row is None:
             raise PackageNotFound(package_id)
+        if row["purged"]:
+            raise PackagePurged(package_id)
         current = db.get_generation()
         release_generation = row["release_generation"]
         if release_generation is None or release_generation != current:
@@ -276,6 +298,46 @@ def claim_package(package_id: str) -> dict[str, object]:
             "columns": _loads(row["columns"]),
             "rows": _loads(row["rows"]),
         }
+
+
+def purge_packages(sources: list[tuple[str, str]]) -> dict[str, object]:
+    """Purge every sealed package whose export depends on a listed column.
+
+    A package depends on a source column when that column reaches the
+    package's export under the original content/row-influence propagation
+    rules with *every* source column tracked — in-graph ``sensitive`` flags
+    and the shared registry play no role. A constant replacement cuts only
+    content provenance; row-level influence left by filters and join keys
+    still counts, while branches the export does not depend on never count.
+
+    Only packages that existed when this operation takes effect are
+    considered (packages sealed afterwards are unaffected), and an already
+    purged package is never listed again. Every matched package's frozen
+    rows and release record are deleted and the package flagged as purged in
+    one transaction — a failed write or commit leaves the whole batch
+    untouched. Graphs, the registry and its generation are never modified.
+    The response lists the purged package ids, sorted by id.
+    """
+    db = get_store()
+    with db.lock:
+        wanted = frozenset(sources)
+        matched: list[str] = []
+        for row in db.list_package_rows():
+            if row["purged"]:
+                continue  # already purged: never listed again
+            graph_row = db.get_graph_row(row["graph_id"])
+            if graph_row is None:  # pragma: no cover - graphs are never deleted
+                continue
+            request = ReviewRequest.model_validate(
+                {"nodes": _loads(graph_row["nodes"]), "export": graph_row["export"]}
+            )
+            content, row_origins = export_source_dependencies(request)
+            if not content.isdisjoint(wanted) or not row_origins.isdisjoint(wanted):
+                matched.append(row["id"])
+        matched.sort()
+        if matched:
+            db.purge_packages(matched)
+        return {"purged": matched}
 
 
 def get_registry() -> dict[str, object]:

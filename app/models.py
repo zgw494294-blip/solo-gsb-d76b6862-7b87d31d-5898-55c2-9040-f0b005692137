@@ -332,6 +332,37 @@ class PackageReleaseRequest(StrictModel):
     expected_generation: int = Field(ge=0)
 
 
+class PackagePurgeSourceIn(StrictModel):
+    """One source column whose dependent sealed packages must be purged."""
+
+    source: str = Field(min_length=1)
+    column: str = Field(min_length=1)
+
+
+class PackagePurgeRequest(StrictModel):
+    """A non-empty list of distinct source columns to purge sealed packages by.
+
+    Every ``(source, column)`` pair identifies one source column; the pairs
+    must be distinct (a repeated pair is a schema error) and the list must
+    not be empty.
+    """
+
+    sources: list[PackagePurgeSourceIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sources_distinct(self) -> "PackagePurgeRequest":
+        seen: set[tuple[str, str]] = set()
+        for item in self.sources:
+            key = (item.source, item.column)
+            if key in seen:
+                raise ValueError(
+                    f"source column '{item.source}/{item.column}' is listed "
+                    "more than once"
+                )
+            seen.add(key)
+        return self
+
+
 class PruneRequest(StrictModel):
     """A review request plus the export columns the caller wants to keep.
 

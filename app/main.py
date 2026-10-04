@@ -21,6 +21,7 @@ from .models import (
     ComposeRequest,
     GraphPreviewRequest,
     GraphRegisterRequest,
+    PackagePurgeRequest,
     PackageReleaseRequest,
     PreviewRequest,
     PruneRequest,
@@ -61,9 +62,12 @@ app = FastAPI(
         "passing small-sample result can be sealed into a pending-release "
         "export package, released under the current registry generation and "
         "claimed afterwards — release and claim always serve the sealed "
-        "data, never a different batch."
+        "data, never a different batch. Sealed packages can also be purged "
+        "by source column: every package whose export depends on a listed "
+        "source column loses its sealed rows and release record for good, "
+        "and its release and claim entries answer 410."
     ),
-    version="1.8.0",
+    version="1.9.0",
     lifespan=lifespan,
 )
 
@@ -176,6 +180,12 @@ async def seal_graph_package(graph_id: str, request: GraphPreviewRequest) -> obj
         )
 
 
+@app.post("/api/packages/purge")
+async def purge_sealed_packages(request: PackagePurgeRequest) -> dict[str, object]:
+    sources = [(item.source, item.column) for item in request.sources]
+    return registry.purge_packages(sources)
+
+
 @app.post("/api/packages/{package_id}/release")
 async def release_sealed_package(
     package_id: str, request: PackageReleaseRequest
@@ -187,6 +197,11 @@ async def release_sealed_package(
             status_code=404,
             content={"error": {"code": "PACKAGE_NOT_FOUND",
                                "message": f"no sealed package with id '{package_id}'"}},
+        )
+    except registry.PackagePurged as exc:
+        return JSONResponse(
+            status_code=410,
+            content={"error": {"code": "PACKAGE_PURGED", "message": str(exc)}},
         )
     except registry.StaleGeneration as exc:
         return JSONResponse(
@@ -211,6 +226,11 @@ async def claim_sealed_package(package_id: str) -> object:
             status_code=404,
             content={"error": {"code": "PACKAGE_NOT_FOUND",
                                "message": f"no sealed package with id '{package_id}'"}},
+        )
+    except registry.PackagePurged as exc:
+        return JSONResponse(
+            status_code=410,
+            content={"error": {"code": "PACKAGE_PURGED", "message": str(exc)}},
         )
     except registry.PackageNotReleased as exc:
         return JSONResponse(
